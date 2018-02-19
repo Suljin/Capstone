@@ -1,0 +1,36 @@
+---
+title: "Capstone Project Proposal"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Predicting Housing Prices for Home Buyers/Sellers
+
+Housing prices have had large changes over the course of the last 15 years, leaving both home owners and buyers in dire need to know accurately the appropriate values of a house. With the power to determine the true value of a house, buyers know what they should be paying for a house they are interested in and can avoid going over a reasonable amount for a house if they get caught in a bidding war. Similarly, a seller can safely determine an amount they may charge and have reasons to back up their potentially higher than expected price tag.
+
+
+
+## Data
+
+The information for this project will be taken from a Kaggle competition. This data can be located on their [website](https://www.kaggle.com/c/house-prices-advanced-regression-techniques). This is great because it has both the train and test data, which will allow me to focus on consistency and accuracy of my predictive model.  
+
+## The Plan
+
+1. Determine which variables hold valuable information
+2. Create derived variables and determine which will be used/replace other variables
+3. From the above important and selected data:
+  + Ensure all data is of uniform type as needed
+  + Determine what to do with outliers
+  + Evaluate if any data weighs significantly more heavily vs other data
+4. Get an idea which type of algorithm will best fit the data
+5. Begin processing and evaluating the model
+  + Make adjustments as needed, create new derived variables that may bring new insight
+6. Validate the model by testing it with the provided test data and see how accurate it is
+7. Make any adjustments to improve the accuracy
+
+## Presentation
+
+Ultimately, the most important part of the presentation will be displaying my formulas for predicting housing prices as well as plots or graphs that can help show the confidence of my model. The formulas should be simply displayed with some basic explanation of why or how they were derived and what they impact.
