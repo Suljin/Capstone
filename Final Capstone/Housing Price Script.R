@@ -1,0 +1,843 @@
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+library(scales)
+library(ggrepel)
+library(tidyr)
+library(gridExtra)
+library(RColorBrewer)
+library(forcats) #used for categorical values
+library(VIM) #kNN impute
+library(cluster) #daisy() clustering
+library(forecast) #accurcy()
+library(car) #ncvTest()
+library(gvlma) #gvlma
+
+
+
+train <- read.csv("C:/Users/jason/Desktop/Capstone/Final Project Housing Prices/traindata.csv")
+test <- read.csv("C:/Users/jason/Desktop/Capstone/Final Project Housing Prices/testdata.csv")
+
+test$SalePrice <- NA
+combined <- rbind(train, test)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#                                     Data Exploration
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# _______Sale Price__________
+ggplot(combined, aes(x = SalePrice)) +
+  geom_histogram(fill = "red", binwidth = 10000) + 
+  stat_bin(binwidth = 10000, geom = "text", aes(label = ..count..), vjust = -1.5) +
+  scale_x_continuous(limits = c(1, 400000), labels = scales::comma)
+
+summary(combined$SalePrice)
+#   Min. 1st Qu.  Median   Mean    3rd Qu.    Max. 
+# 34900  129975   163000   180921  214000     755000
+
+# _______SalePrice vs Square Foot______
+# Is there a relation to size of house and price?    
+ggplot(combined, aes(x = X1stFlrSF + X2ndFlrSF + BsmtFinSF1, y = SalePrice)) +
+  geom_point() +
+  scale_y_continuous(labels = scales::comma) +
+  geom_smooth(method = "lm") +
+  scale_x_continuous(name = "Bsmt + 1st + 2nd Floor (sqft)")
+# Yes positive correlation between house size and price
+# look at the outliers
+size <- combined %>% as_tibble() %>% mutate(
+  sqft = X1stFlrSF + X2ndFlrSF + BsmtFinSF1
+)
+# Houses 1299 (11286sqft), 255(6936sqft), 524(6572sqft)
+# View(size[c(1299, 524, 1183), ])
+# Determine why they are so low in value?
+
+
+# ______Correlation_______
+# Important Variables, using correlation can determine which have big impact
+numbers <- which(sapply(combined, is.numeric))
+numNames <- names(numbers)
+
+combined_numVar <- combined[, numbers]
+cor_numVar <- cor(combined_numVar, use = "pairwise.complete.obs") #find correlation values between all numbered variables
+cor_sorted <- as.matrix(sort(cor_numVar[, "SalePrice"], decreasing = TRUE))
+#SalePrice      1.00000000
+#OverallQual    0.79098160
+#GrLivArea      0.70862448
+#GarageCars     0.64040920
+#GarageArea     0.62343144
+#TotalBsmtSF    0.61358055
+#X1stFlrSF      0.60585218
+#FullBath       0.56066376
+#TotRmsAbvGrd   0.53372316
+#YearBuilt      0.52289733
+#YearRemodAdd   0.50710097
+
+# Top 10, all above 0.5 corr
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x) > 0.5)))
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+corrplot.mixed(cor_numVar, tl.col = "black", tl.pos = "lt")
+# Shows that there could be issues with colinearity (such as with garagecars and garage area
+# both of which have a strong correlation with SalePrice). 
+
+# OverallQual has the highest correlation with SalePrice (0.79). It is a value 1-10 showing the quality of a home
+# Min. 1st Qu.  Median    Mean 3rd Qu.    Max. 
+# 1.000   5.000   6.000   6.089   7.000  10.000
+
+
+# _________Overall Quality vs SalePrice _____________
+Quality_Box <- ggplot(combined, aes(x = factor(OverallQual), y = SalePrice)) + # factor() splits graph by numbered value
+  geom_boxplot(col = "blue") +
+  labs(x = "Overall Quality") +
+  scale_y_continuous(labels = comma)
+  
+Quality_Box + geom_smooth(methond = "lm", se = FALSE, aes(group = 1), color = "red")
+
+# Clearly shows that as Overal Quality goes up, so does Sale Price (not surprising)
+# Seems to be a change in rate between 6 and 7. The price/quality point seems to increase there 
+# As quality goes up, so does the variance in prices (expected), as features vary and so does associated costs
+# No major outliers other than a high cost house with quality 4(mistake?), and possibly a low cost home at quality 10.
+
+
+#_________Above Ground Living Area vs SalePrice____________
+ggplot(combined, aes(x = GrLivArea, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm") + #linear model
+  scale_y_continuous(labels = comma)
+
+# Some outliers at 4700 sqft and 5600 sqft to be considered later
+
+
+#__________Garage Cars vs SalePrice_________
+# Size of garage in car capacity
+
+Garage_Box <- ggplot(combined, aes(x = factor(GarageCars), y = SalePrice)) +
+  geom_boxplot()
+Garage_Box + geom_smooth(method = "lm", se = FALSE, aes(group = 1))
+# As garage capacity (in terms of cars) goes up, so would the value of the house with it. 
+cat("There are", length(which(combined$GarageCars == 3)), "homes with a 3 car garage")
+cat("There are", length(which(combined$GarageCars == 4)), "homes with a 4 car garage")
+# Huge difference in the number of homes with a 3 car vs 4 car garage.
+
+#_____________GarageArea vs SalePrice________________
+# Size of garage in sqft
+ggplot(combined, aes(x = GarageArea, y = SalePrice)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+
+
+
+
+#---------------------------------------------------
+#_____________Factored Categories___________________
+factors <- which(sapply(combined, is.factor))
+
+
+#_____________Price and Others grouped by Neighborhood_________________
+# Are some houses more costly based on certain neighborhoods?
+citygroup <- combined %>%
+  select(Neighborhood, SalePrice, LotArea, LotFrontage, X1stFlrSF, X2ndFlrSF, OverallQual, YearBuilt) %>%
+  dplyr::group_by(Neighborhood) %>%
+  dplyr::summarize(SalePrice = mean(SalePrice, na.rm = TRUE), LotArea = mean(LotArea, na.rm = TRUE), LotFrontage = mean(LotFrontage, na.rm = TRUE), SF = mean(X1stFlrSF + X2ndFlrSF), OverallQual = mean(OverallQual), YearBuilt = mean(YearBuilt))
+
+
+# Reorder factor levels of Neighborhood by Saleprice
+citygroup$Neighborhood <- factor(citygroup$Neighborhood, levels = citygroup$Neighborhood[order(citygroup$SalePrice)]) 
+
+colorcount <- length(citygroup$Neighborhood) # n count for color pallete
+getPalette <- colorRampPalette(brewer.pal(9, "Set1")) # interpolating colors
+
+# Neighborhood by Sale Price
+neighborhood1 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), SalePrice)) +
+  scale_y_continuous(labels = comma) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  geom_hline(yintercept = mean(citygroup$SalePrice), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) 
+
+neighborhood1 # Clearly some of the neighborhoods have much more valuable houses than others
+# NoRidge, NridgHt, stoneBr
+
+# Neighborhood by OverallQual
+neighborhood2 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), OverallQual)) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(limits = c(0, 10)) +
+  geom_hline(yintercept = mean(citygroup$OverallQual), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood2 # Overall similar pattern between OverallQual and SalePrice for each Neighborhood
+# Those that rate houses seem to be consistent vs SalesPrice
+
+# Price by OverallQuality
+neighborhood3 <- ggplot(citygroup, aes(x = OverallQual, y = SalePrice)) +
+  geom_smooth(method = "lm") +
+  scale_y_continuous(labels = comma)
+
+neighborhood3
+# Price appears to be directly related to OverallQual (shows the people are accurate in their ratings of a house)
+
+# Neighborhood by house age
+neighborhood4 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (2018 - YearBuilt))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(name = "Avg. House Age (yrs)") +
+  geom_hline(yintercept = mean(2018 - citygroup$YearBuilt), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  
+neighborhood4
+
+# House size by Neighborhood
+neighborhood5 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (citygroup$SF))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(labels = comma, name = "Square Footage (sqft)") +
+  geom_hline(yintercept = mean(citygroup$SF), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood5 # Most neighborhoods follow the trend larger homes = higher sales price
+
+# Lot area by Neighborhood
+neighborhood6 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (citygroup$LotArea))) +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(name = "Lot Area (sqft)") +
+  geom_hline(yintercept = mean(citygroup$LotArea), color = "black", linetype = "dashed") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+neighborhood6 # Some neighborhoods have significantly larger lot areas (and several significantly less, probably town houses etc)
+
+# Comparison graph
+# Neighborhood 1 and 2 compared, Shows some large differences between SalePrice and OverallQual by Neighborhood.
+# NoRidge has highest SalePrice but 3rd highest Quality rating, and Blueste has a significantly lower SalePrice vs quality rating
+# Can see that places like BrDale, Blueste, NPkVill all have higher quality than their respective neighbors for saleprice. This shows that they are best value
+grid.arrange(neighborhood1, neighborhood2, neighborhood5, neighborhood6, neighborhood4, nrow = 5)
+
+grid.arrange(neighborhood1, neighborhood2, nrow =2)
+grid.arrange(neighborhood5, neighborhood6, nrow=2)
+grid.arrange(neighborhood4, nrow=2)
+
+
+# After adjust the theme on previous graphs, takes up too much space in grid ----> find a solution
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#                                                  Data Exploration
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+aggr(combined)# Shows all the missing values
+
+# Ordinal Values for use later with other variables
+Quality <- c("None" = 0, "Po" = 1, "Fa" = 2, "TA" = 3, "Gd" = 4, "Ex" = 5)
+
+NAcol <- which(colSums(is.na(combined)) > 0)
+sort(colSums(sapply(combined[NAcol], is.na)), decreasing = TRUE)
+# 1459 in SalePrice are the missing values to predict
+# PoolQC has the most missing values at 2909
+# Ex = Excellent, Gd = Good, TA = Avg, Fa = Fair, NA = no pool
+
+
+# __________________PoolQC____________________
+print(fct_count(combined$PoolQC)) # show the number and levels appearin
+
+combined$PoolQC <- factor(ifelse(is.na(combined$PoolQC), "None", paste(combined$PoolQC)), levels = c(levels(combined$PoolQC), "None"))
+combined$PoolQC <- factor(combined$PoolQC, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"))
+combined$PoolQC <- as.integer(combined$PoolQC) - 1
+
+str(combined$PoolQC)
+table(combined$PoolQC)
+
+#__________________PoolArea_____________________
+
+combined[combined$PoolArea > 0, c('PoolArea', 'PoolQC', 'OverallQual')] # See the values for the few pools and if there was a correlation between poolqc, area, and overallqual
+ggplot(combined, aes(x = PoolArea, y = PoolQC)) + geom_point() #very little relation
+# 2600 and 2421 are similar with OverallQual and will be imputed based on values nearby with similar Overall Quality
+# 2504 will be done similarly, with a higher value based on nearby ones
+
+test <- combined %>% subset(PoolQC > 0)
+
+ggplot(test, aes(x = OverallQual, y = PoolQC)) + 
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  scale_x_continuous(limits = c(0, 10), labels = scales::comma)
+
+combined$PoolQC[2600] <- 2
+combined$PoolQC[2421] <- 2
+combined$PoolQC[2504] <- 3
+
+#______MiscFeature______
+combined$MiscFeature <- factor(ifelse(is.na(combined$MiscFeature), "None", paste(combined$MiscFeature)), levels = c(levels(combined$MiscFeature), "None"))
+# change NA to None
+
+ggplot(combined, aes(x = MiscFeature, y = SalePrice)) +
+  geom_bar(stat = "Summary", fun.y = "median", fill = 'purple') +
+  scale_y_continuous(labels = comma) +
+  geom_label(stat = "count", aes(label = ..count.., y = ..count..))
+# Avg SalePrice by Misc. Feature. Tenis court seems to add the most value (but only 1 house has that feature)
+# Houses with a shed have a lower value than those with nothing, which probably means that in place of a garage, the houses have a shed
+# No imputation needed for houses with none.
+
+#______Alley______
+combined$Alley <- factor(ifelse(is.na(combined$Alley), "None", paste(combined$Alley)), levels = c(levels(combined$Alley), "None"))
+# Converts NA's to None
+
+ggplot(combined, aes(x = Alley, y = SalePrice)) +
+  geom_bar(stat = "Summary", fill = 'blue', fun.y = "median")
+# As expected, houses with a paved alley have higher value than those with gravel ones, and those without only slightly lower.
+# No imputation needed
+
+#______Fence______
+# 2348 NA for No Fence
+combined$Fence <- factor(ifelse(is.na(combined$Fence), "None", paste(combined$Fence)), levels = c(levels(combined$Fence), "None"))
+
+ggplot(combined, aes(x = Fence, y = SalePrice)) +
+  geom_bar(stat = "Summary", fill = "dark green", fun.y = "median")
+
+#Doesn't seem to be much difference between no fence and the different values of fences (good privacy, min privacy, good wood, minimum wood/wire, and none)
+
+#______Fireplace Quality______
+# 1420 NA for None, which is the same amount as houses with 0 fireplaces, making for easy replacing NA's
+combined$FireplaceQu <- factor(ifelse(is.na(combined$FireplaceQu), "None", paste(combined$FireplaceQu)), levels = c(levels(combined$FireplaceQu), "None"))
+
+combined$FireplaceQu <- factor(combined$FireplaceQu, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex")) #Reorder levels
+combined$FireplaceQu <- as.integer(combined$FireplaceQu) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+
+table(combined$FireplaceQu)
+
+ggplot(combined, aes(x = FireplaceQu, y = SalePrice)) +
+  geom_bar(stat = "summary", fun.y = "median", fill = 'orange')
+# SalePrice is on par with quality levels. None is about as equal as a "poor" fireplace
+
+#______Lot Frontage_____
+# 486 NA
+
+ggplot(combined[!is.na(combined$LotFrontage),], aes(x = as.factor(Neighborhood), y = LotFrontage)) +
+  geom_bar(stat = "summary", fun.y = "median", fill = "blue") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood7 <- ggplot(citygroup) +
+  geom_col(aes(factor(Neighborhood), fill = factor(Neighborhood), y = (citygroup$LotFrontage)))  +
+  scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+  scale_y_continuous(name = "Lot Frontage (sqft)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+neighborhood7
+# No matching trend to the SalesPrice based on neighbhorhood, but certainly variance among some. Easiest solution is to use knn to determine based on neighborhoods
+citygroup[,c("Neighborhood", "LotFrontage")]
+
+impute <- kNN(combined, k = 5)
+
+imputeNeighborhood <- impute %>% select(Neighborhood, LotFrontage) %>%
+  dplyr::group_by(Neighborhood) %>% 
+  dplyr::summarize(LotFrontage = mean(LotFrontage))
+
+imputeNeighborhood
+
+combined$LotFrontage <- impute$LotFrontage
+
+# temp <- combined
+# combined <- temp
+# aggr(combined)
+# 
+# #_______________Neighborhood: Simplifying _____________
+# neighborhood1
+# # Determine clusters and assign numerical values to each cluster for regression fit
+# d <- round(as.matrix(daisy(combined)))
+# d <- as.data.frame(daisy(neighborSale))
+# fit <- hclust(d, method = "ward.D")
+# plot(fit) #display dendrogram
+# groups <- cutree(fit, k = 4) #5 clusters for tree
+# rect.hclust(fit, k = 4, border = "red")
+# 
+# neighborSale <- cbind(neighborSale, groups)
+# 
+# neighborGroups <- neighborSale %>% select(Neighborhood, SalePrice, groups)
+# 
+# 
+# 
+# 
+# neighborGroups
+# # Add groups to primary data frame
+# combined <- cbind(combined, groups)
+# 
+# neighborGroupSales <- ggplot(neighborGroups) +
+#   geom_col(aes(factor(groups), fill = factor(Neighborhood), SalePrice)) +
+#   scale_y_continuous(labels = comma) +
+#   scale_fill_manual(values = getPalette(colorcount), guide = FALSE) +
+#   geom_hline(yintercept = mean(neighborGroups$SalePrice), color = "black", linetype = "dashed") +
+#   theme(axis.text.x = element_text(angle = 45, hjust = 1))
+# 
+# neighborGroupSales
+# 
+# ggplot(neighborGroups, aes(x = as.factor(Neighborhood), y = SalePrice, color = groups)) + geom_point() +
+#   scale_y_continuous(labels = scales::comma) +
+#   geom_jitter()
+
+
+
+
+#_______GarageYrBlt_________
+#159 NA
+
+garage <- combined[,c("GarageType", "GarageYrBlt", "GarageFinish", "GarageCars", "GarageArea", "GarageQual", "GarageCond", "SalePrice")]
+# View(combined[is.na(combined$GarageType), c("GarageType", "GarageYrBlt", "GarageFinish", "GarageCars", "GarageArea", "GarageQual", "GarageCond", "SalePrice")])
+
+
+#GarageYrBlt NA to default to year house was built, similarly with how remodel does with house yr built
+for(i in 1:nrow(combined)){
+  if (is.na(combined$GarageYrBlt[i])){
+    combined$GarageYrBlt[i] <- as.integer(combined$YearBuilt[i])
+  }
+}
+
+#_______The 2 GarageType with other missing NA' stats___________
+# 2127 Has a shed, missing Qual, Condition, and Finish
+# 2577 doesn't appear to have a garage, and missing Qual, Condition, and Finish
+combined$GarageFinish[2127] <- names(sort(-table(combined$GarageFinish[1])))
+combined$GarageQual[2127] <- names(sort(-table(combined$GarageQual[1])))
+combined$GarageCond[2127] <- names(sort(-table(combined$GarageCond[1])))
+
+# Check fixed garage info for House 2127
+combined[2127, c("GarageYrBlt", "GarageCars", "GarageArea", "GarageType", "GarageCond", "GarageQual", "GarageFinish")]
+
+# Fixing 2577 house values
+combined$GarageCars[2577] <- 0
+combined$GarageArea[2577] <- 0
+combined$GarageType[2577] <- NA #fix the mistakenly labeled Dtached garage so in next step its converted to None
+
+#_______Remaining values without a garage______
+#_______GarageType_________
+#GarageType NA to None
+combined$GarageType <- factor(ifelse(is.na(combined$GarageType), "None", paste(combined$GarageType)), levels = c(levels(combined$GarageType), "None"))
+
+#_______GarageCond/Finish/Qual_______
+combined$GarageCond <- factor(ifelse(is.na(combined$GarageCond), "None", paste(combined$GarageCond)), levels = c(levels(combined$GarageCond), "None"))
+combined$GarageFinish <- factor(ifelse(is.na(combined$GarageFinish), "None", paste(combined$GarageFinish)), levels = c(levels(combined$GarageFinish), "None"))
+combined$GarageQual <- factor(ifelse(is.na(combined$GarageQual), "None", paste (combined$GarageQual)), levels = c(levels(combined$GarageQual), "None"))
+# Add "None" to levels and replace NA with None for Cond/Qual/Finish for the houses that don't have a garage.
+
+
+
+#______Basement_______
+combined[!is.na(combined$BsmtFinType1) & (is.na(combined$BsmtCond)|is.na(combined$BsmtQual)|is.na(combined$BsmtExposure)|is.na(combined$BsmtFinType2)),
+         c("BsmtQual", "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2")]
+# Shows missing values where it appears to have basements
+
+# Imputing for the missing values with most common:
+combined$BsmtFinType2[333] <- names(sort(-table(combined$BsmtFinType2)))[1]
+combined$BsmtExposure[c(949, 1488, 2349)] <- names(sort(-table(combined$BsmtExposure)))[1]
+combined$BsmtCond[c(2041, 2186, 2525)] <- names(sort(-table(combined$BsmtCond)))[1]
+combined$BsmtQual[c(2218, 2219)] <- names(sort(-table(combined$BsmtQual)))[1]
+
+# Now # of missing values for basement related variables is all the same, representing no basement.
+combined$BsmtQual <- factor(ifelse(is.na(combined$BsmtQual), "None", paste(combined$BsmtQual)), levels = c(levels(combined$BsmtQual), "None"))
+combined$BsmtCond <- factor(ifelse(is.na(combined$BsmtCond), "None", paste(combined$BsmtCond)), levels = c(levels(combined$BsmtCond), "None"))
+combined$BsmtExposure <- factor(ifelse(is.na(combined$BsmtExposure), "None", paste(combined$BsmtExposure)), levels = c(levels(combined$BsmtExposure), "None"))
+combined$BsmtFinType1 <- factor(ifelse(is.na(combined$BsmtFinType1), "None", paste(combined$BsmtFinType1)), levels = c(levels(combined$BsmtFinType1), "None"))
+combined$BsmtFinType2 <- factor(ifelse(is.na(combined$BsmtFinType2), "None", paste(combined$BsmtFinType2)), levels = c(levels(combined$BsmtFinType2), "None"))
+
+combined$BsmtQual <- factor(combined$BsmtQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex")) #Reorder levels
+combined$BsmtQual <- as.integer(combined$BsmtQual) - 1
+table(combined$BsmtQual)
+
+combined$BsmtExposure <- factor(combined$BsmtExposure, levels = c("None", "No", "Mn", "Av", "Gd")) #Reorder levels
+combined$BsmtExposure <- as.integer(combined$BsmtExposure) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+table(combined$BsmtExposure)
+
+
+#__________House Masonry_____________
+
+# View(combined[is.na(combined$MasVnrType), c("MasVnrType", "MasVnrArea", "YearBuilt", "ExterCond")])
+# House 2611 missing MasVnrType. Impute with most common 
+combined$MasVnrType[2611] <- names(sort(-table(combined$MasVnrType)))[2] #most common is none, so chose 2nd most common
+
+# Determine Ordinality for the 23 houses without MasVnrType missing and fill in with None
+combined$MasVnrType[is.na(combined$MasVnrType)] <- "None"
+exterier <- combined[!is.na(combined$SalePrice),] %>% group_by(MasVnrType) %>% dplyr::summarise(median = median(SalePrice), counts = n()) %>%arrange(median)
+
+# Clearly ordinal, Stone > BrkFace = None
+masonry <- c("None" = 0, "BrkCmn" = 0, "BrkFace" = 1, "Stone" = 2)
+combined$MasVnrType<- factor(combined$MasVnrType, levels = c("None", "BrkCmn", "BrkFace", "Stone")) #Reorder levels
+combined$MasVnrType <- as.integer(combined$MasVnrType) - 1 # Converts to integers 1+, then subtracts 1 so none = 0)
+table(combined$MasVnrType) #increases the value of everything by 1 why?
+
+#______________MasVnrArea____________
+# Just needs to be replaced with 0's as the NA houses don't have a vaneer
+combined$MasVnrArea[is.na(combined$MasVnrArea)] <- 0
+
+#_____________MSZoning_______________
+# 4 value missing
+
+combined$MSZoning[is.na(combined$MSZoning)] <- names(sort(-table(combined$MSZoning)))[1] #replace the 4 missing values with most common factor level
+table(combined$MSZoning)
+
+#_____________Utilities______________
+# 2 values missing
+combined$Utilities[is.na(combined$Utilities)]
+table(combined$Utilities) #Since 99% of the values are all AllPub, variable has no use for predicting, so dropping
+
+combined$Utilities <- NULL
+
+#____________Functional____________
+# 2 missing values
+table(combined$Functional) #Most houses are Typical, no house below 
+
+# imputing with most common: Type
+combined$Functional[is.na(combined$Functional)] <- names(sort(-table(combined$Functional)))[1]
+ 
+print(fct_count(combined$Functional))
+combined$Functional <- factor(combined$Functional, levels = c("Sal", "Sev", "Maj2", "Maj1", "Mod", "Min2", "Min1", "Typ")) #Reorder levels
+Funct <- c("Sal" = 0, "Sev" = 1, "Maj2" = 2, "Maj1" = 3, "Mod" = 4, "Min2" = 5, "Min1" =6, "Typ" = 7)
+
+combined$Functional <- as.integer(combined$Functional) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+table(combined$Functional)
+
+
+
+
+#________Bsmt Baths/Fin_________
+#Several basement variables have 1 or 2 values missing
+
+combined[is.na(combined$BsmtFullBath)|is.na(combined$BsmtHalfBath)|is.na(combined$BsmtFinSF1)|
+           is.na(combined$BsmtFinSF2)|is.na(combined$BsmtUnfSF)|is.na(combined$TotalBsmtSF), c("BsmtQual", "BsmtFullBath", 
+           "BsmtHalfBath", "BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF")]
+
+# looks like these missing values are for errors, houses without basements. All int type so no need for dealing with factor levels
+combined$BsmtFinSF1[2121] <- 0
+combined$BsmtFinSF2[2121] <- 0
+combined$BsmtUnfSF[2121] <- 0
+combined$TotalBsmtSF[2121] <- 0
+combined$BsmtFullBath[2121] <- 0
+combined$BsmtHalfBath[2121] <- 0
+
+combined$BsmtFinSF1[2189] <- 0
+combined$BsmtFinSF2[2189] <- 0
+combined$BsmtFullBath[2189] <- 0
+combined$BsmtHalfBath[2189] <- 0
+
+
+
+#_______________Exterior___________________
+combined[is.na(combined$Exterior1st)|is.na(combined$Exterior2nd),]
+#Missing exterior 1st and 2nd, impute with most common value
+combined$Exterior1st[is.na(combined$Exterior1st)] <- names(sort(-table(combined$Exterior1st)))[1]
+combined$Exterior2nd[is.na(combined$Exterior2nd)] <- names(sort(-table(combined$Exterior2nd)))[1]
+
+# Convert ExterQual to integer
+combined$ExterQual <- factor(ifelse(is.na(combined$ExterQual), "None", paste(combined$ExterQual)), levels = c(levels(combined$ExterQual), "None"))
+
+combined$ExterQual <- factor(combined$ExterQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex")) #Reorder levels
+combined$ExterQual <- as.integer(combined$ExterQual) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+table(combined$ExterQual)
+
+# Convert ExterCond to integer
+combined$ExterCond <- factor(ifelse(is.na(combined$ExterCond), "None", paste(combined$ExterCond)), levels = c(levels(combined$ExterCond), "None"))
+
+combined$ExterCond <- factor(combined$ExterCond, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex")) #Reorder levels
+combined$ExterCond <- as.integer(combined$ExterCond) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+table(combined$ExterCond)
+
+#___________________Electrical________________
+combined[is.na(combined$Electrical),] #1380 missing value
+#impute with most common value
+combined$Electrical[is.na(combined$Electrical)] <- names(sort(-table(combined$Electrical)))[1]
+
+#__________________KitchenQual________________
+combined[is.na(combined$KitchenQual),] #1556 missing value, impute with most common (TA)
+combined$KitchenQual[is.na(combined$KitchenQual)] <- names(sort(-table(combined$KitchenQual)))[1]
+
+combined$KitchenQual <- factor(ifelse(is.na(combined$KitchenQual), "None", paste(combined$KitchenQual)), levels = c(levels(combined$KitchenQual), "None"))
+
+combined$KitchenQual <- factor(combined$KitchenQual, levels = c("None", "Po", "Fa", "TA", "Gd", "Ex")) #Reorder levels
+combined$KitchenQual <- as.integer(combined$KitchenQual) - 1 # Converts to integers 1+, then subtracts 1 so none = 0
+table(combined$KitchenQual)
+
+
+#_________________GarageCars/Area_________________
+combined[is.na(combined$GarageCars), c("GarageType", "GarageYrBlt", "GarageCars", "GarageArea")] #2577 missing both garage cars and area. Appears to have detatched
+combined[is.na(combined$GarageArea), ] #2577
+
+impute <- kNN(combined, k = 5) #impute values for garagearea and number of cars
+
+combined[2577, c("GarageCars", "GarageArea")] <- impute[2577, c("GarageCars", "GarageArea")] #replace with imputed values
+
+#_________________SaleType_______________
+combined[is.na(combined$SaleType), ] #2490 missing, replace with most common WD
+
+combined[2490, "SaleType"] <- "WD"
+
+#_____________TYPOS______________
+#combined$GarageYrBlt has a typo. House #2593 has a yr built as 2207, clearly to be 2007
+combined$GarageYrBlt[2593] <- 2007
+
+
+#___________Ordinal Values_________
+combined$Street <- as.integer(plyr::revalue(combined$Street, c("Grvl" = 0, "Pave" = 1))) - 1
+
+combined$PavedDrive <- as.integer(plyr::revalue(combined$PavedDrive, c("N" = 0, "P" = 1, "Y" = 2))) - 1
+
+
+
+#___________INT -> Factors__________
+#MSSubclass
+
+combined$MSSubClass <- as.factor(combined$MSSubClass)
+
+#____________LandSlope____________
+ggplot(combined, aes(x = LandSlope, y = SalePrice)) + geom_point() # clearly ordinal Gtl > Mod > Sev
+
+#_______________Total Living Space________________
+# Combining all the square footage values for inside of a house and making a new variable to represent all of them
+
+combined$totalSqFt <- combined$GrLivArea + combined$TotalBsmtSF
+
+ggplot(combined[1:1460, ], aes(x = totalSqFt, y = SalePrice)) +
+  geom_point() + 
+  geom_smooth(method = "lm") +
+  geom_text_repel(aes(label = ifelse(totalSqFt > 6000, as.character(Id), ''))) 
+# with some guidance from Mr. Bruin's guide (www.kaggle.com/erikbruin/house-prices-lasso-xgboost-and-a-detailed-eda) for how to label
+ 
+
+# As rightfully expected, there is a strong correlation between overall house size and cost
+cor(combined$SalePrice, combined$totalSqFt, use = "pairwise.complete.obs") # 0.78
+
+# Also of note, the two outliers (houses # 524 and 1299). When removed the correlation goes up 5%
+# cor(combined$SalePrice[-c(524, 1299)], combined$totalSqFt[-c(524, 1299)], use = "pairwise.complete.obs") #0.83
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#                                    CORRELATION
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Re-check correlation values now that NA's have been filled etc to see most important variables
+numbers <- which(sapply(combined, is.numeric))
+
+all_numbers <- combined[, numbers] #DF with only numeric variables
+cor_numVar <- cor(all_numbers, use="pairwise.complete.obs")
+cor_sorted <- as.matrix(sort(cor_numVar[, 'SalePrice'], decreasing = TRUE)) #Sort by SalePrice, decreasing
+cor_sorted
+
+# OverallQual    0.790
+# totalSqFt      0.778
+# GrLivArea      0.708
+# ExterQual      0.682
+# KitchenQual    0.659
+# GarageCars     0.640
+# GarageArea     0.623
+# TotalBsmtSF    0.613
+# X1stFlrSF      0.605
+# BsmtQual       0.585
+
+
+
+CorHigh <- names(which(apply(cor_sorted, 1, function(x) abs(x)>0.5))) # Select only the cors higher than 0.5
+cor_numVar <- cor_numVar[CorHigh, CorHigh]
+
+
+corrplot.mixed(cor_numVar, tl.col ="black", tl.pos = "lt", tl.cex = 0.7, cl.cex = 0.7, number.cex = .7)
+# correlation plot of the highest values
+# Colinearity with GrLivArea (above ground living area) and TotRmsAbvGr (Obvious)
+# TotalBsmtSF and X1stFlrSF (Basement SF expected to be similar in size to 1st floor)
+# YearBuilt and GarageYrBlt have colinearity due to garageyrbuilt defaulting to [house]YearBuilt when no year provided
+# 
+
+aggr(combined)# Shows all the missing values
+temp <- combined
+combined <- temp
+NAcol <- which(colSums(is.na(combined)) > 0)
+sort(colSums(sapply(combined[NAcol], is.na)), decreasing = TRUE)
+aggr(combined)
+
+
+# Data Points determined to be outliers and dropped from various observances above:
+# combined <- combined[-c(524, 1299), ]
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#                                   Linear Regression
+#~~~~~~~~A~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#____________Models____________
+model <- lm(SalePrice ~., combined) #Very basic using all variables
+
+# Grouping didn't work when I came back so instead of deleting, I left things to pick up when I had more time to solve it
+# model1 <- lm(SalePrice ~ LotArea + LandSlope + Neighborhood + Condition1 + Condition2 + OverallQual + OverallCond + YearBuilt
+#             + RoofMatl + ExterQual + BsmtQual + BsmtExposure + BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF + X1stFlrSF + X2ndFlrSF
+#             + KitchenQual + KitchenAbvGr + TotRmsAbvGrd + Functional + Fireplaces + GarageType + GarageArea + WoodDeckSF 
+#             + ScreenPorch + groups, combined)
+# 
+# model2 <- lm(SalePrice ~ LotArea + LandSlope + Condition1 + Condition2 + OverallQual + OverallCond + YearBuilt
+#              + RoofMatl + ExterQual + BsmtQual + BsmtExposure + BsmtFinSF1 + BsmtFinSF2 + BsmtUnfSF + X1stFlrSF + X2ndFlrSF
+#              + KitchenQual + KitchenAbvGr + TotRmsAbvGrd + Functional + Fireplaces + GarageType + GarageArea + WoodDeckSF 
+#              + ScreenPorch + groups, combined)
+
+model3 <- lm(SalePrice ~ OverallQual + totalSqFt + GrLivArea + ExterQual + GarageCars + KitchenQual, combined)
+
+model4 <- lm(SalePrice ~ OverallQual + GrLivArea + GarageArea + TotalBsmtSF + X1stFlrSF + X2ndFlrSF + FullBath + TotRmsAbvGrd
+             + YearBuilt + YearRemodAdd + Neighborhood , combined)
+
+model5 <- lm(SalePrice ~ OverallQual + totalSqFt + GrLivArea + ExterQual + KitchenQual + GarageArea + X1stFlrSF + X2ndFlrSF + BsmtQual
+             + FullBath + TotRmsAbvGrd + YearBuilt + FireplaceQu + GarageYrBlt + YearRemodAdd + LotArea + LandSlope + Neighborhood, combined)
+
+model6 <- lm(SalePrice ~ OverallQual + totalSqFt + GrLivArea + ExterQual + KitchenQual + GarageArea + X1stFlrSF + X2ndFlrSF + BsmtQual
+             + FullBath + HalfBath + TotRmsAbvGrd + YearBuilt + FireplaceQu + GarageYrBlt + YearRemodAdd + LotArea  + Neighborhood
+             + GarageFinish + OverallCond + GarageQual + MSZoning, combined)
+
+
+
+#                                                                       (0)         (0%)               
+               # R^2      Adjusted   ME           RMSE      MAE        MPE          MAPE
+summary(model) # 0.9303   0.9169     0.0027       20975     14563      -0.546       8.749    Base with all variables used
+#summary(model1)#                                                                            Top signifint variables + groups
+#summary(model2)#                                                                            Model 1 w/o Neighborhood, using groups
+summary(model3)# 0.8230   0.8223    -0.0061       33434     23528      -1.457       14.53    Simple model 
+#summary(model4)# 0.8486   0.8450     0.0041       30917     20910      -1.109       12.60    Simple model with only important numeric variables and factor Neighborhood
+#summary(model5)# 0.8640   0.8599    -0.0013       29309     19935      -1.005       12.04    Added several more numeric variables
+summary(model6)# 0.8740   0.8693     0.0075       28205     19003      -0.763       11.35    Mixed model of factors + int, adding un supplemental groups (MSZoning, halfbath, GarageFinish etc)
+
+anova(model, model6) #for some quick comparisons and significance check
+
+trueValues <- combined[1:1458, "SalePrice"]
+
+
+
+#__________Prediction_________
+prediction <- as.vector(round(predict(model), 0))
+prediction1 <- as.vector(round(predict(model1), 0))
+prediction2 <- as.vector(round(predict(model2), 0))
+prediction3 <- as.vector(round(predict(model3), 0))
+prediction4 <- as.vector(round(predict(model4), 0))
+prediction5 <- as.vector(round(predict(model5), 0))
+prediction6 <- as.vector(round(predict(model6), 0))
+
+accuracy(prediction, trueValues) # Compares models for ME:MAPE above
+
+#____________SalePrice + PredictionSale______________
+predSale <- as.matrix(round(predict(model), 0))
+compSale <- as.data.frame(cbind(combined[1:1458, c("Id", "SalePrice")], predSale))
+compSale$dif <- compSale$SalePrice-compSale$predSale
+
+avgdif <- mean(compSale$dif)
+sddif <- sd(compSale$dif)
+errormodel <- ggplot(compSale, aes(x = Id, y = dif)) + # View residual differences. Above 0, are instances where I overpredicted the value,
+  geom_point() +                         # and blow 0 are where the prediction undershot the cost.
+  geom_hline(yintercept = mean(avgdif), linetype = "dashed", color = "red") +
+  geom_hline(yintercept = c(sddif, -sddif), linetype = "dashed", color = "orange") +
+  geom_hline(yintercept = c(2*sddif, -2*sddif), linetype = "dashed", color = "blue") +
+  geom_hline(yintercept = c(3*sddif, -3*sddif), linetype = "dashed", color = "green") +
+  geom_text_repel(aes(label = ifelse(dif > 3*sddif | dif < -3*sddif, as.character(Id), ''))) +
+  scale_y_reverse(labels = scales::comma)
+  
+  
+errormodel
+errormodel3
+errormodel6
+
+
+
+# Check outliers
+outliers <- compSale %>% subset( dif> 3*sddif | dif < -3*sddif)
+#View(combined[outliers$Id, ])
+
+compplot <- ggplot(compSale, aes(x = Id, y = value), color = variable) + 
+  geom_point(aes(y = compSale$SalePrice, col = "actual", alpha = 0.50)) +
+  geom_point(aes(y = compSale$predSale, col = "predict", alpha = 0.50)) +
+  scale_y_continuous(labels = scales::comma)
+
+ggplot(compSale, aes(x = Id, y = compSale$SalePrice, alpha = 0.75)) + geom_point()
+
+compplot
+compplot3 # as prediction gets better, the dots will merge
+compplot6
+
+
+# Analyze model
+confint(model3)
+par(mfrow=c(2,2))
+
+
+
+plot(model) # no apparent heteroscedasticity, Q-Q plot needs some scaling effects to fix. No eggregious outliers
+plot(model3) # som heteroscedasticity
+plot(model6) # Q-Q plot even worse, some heteroscedasticity 
+
+                                   
+ncvTest(model6) # p nonsignificant   # Model  0     Model3  0    Model6 0 (< 0.05 heteroscedasticity  not present)  
+
+
+residplot <- function(model, nbreaks = 250) {
+  z <- rstudent(model)
+  hist(z, breaks = nbreaks, freq = FALSE,
+       xlab = "Studentized Residual", main = "Distribution of Errors")
+  rug(jitter(z), col = "brown")
+  curve(dnorm(x, mean = mean(z), sd = sd(z)),
+        add = TRUE, col = "blue", lwd = 2)
+  lines(density(z)$x, density(z)$y,
+        col="red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Normal Curve", "Kernel Density Curve"),
+         lty = 1:2, col=c("blue", "red"), cex = .7)
+}
+residplot(model)
+
+
+#View(combined[ , c("Id", "SalePrice")])
+
+#_______________Results_______________
+# Update Test set
+test <- combined[1460:2919, ]
+predSale <- as.data.frame(predict(model, newdata = test))
+combined[1461:2919, "SalePrice"] <- predSale
+
+
+
+
+#____________Test Data_____________
+SampleSubmission <- round(predSale, digits = 1)
+write.csv(SampleSubmission, "SampleSubmission.csv")
+#1 8/1/18 RMSE = 0.59350     bottom 1.87%  
+#2 8/7/18 RMSE =             bottom         model
+
+
+
+
+
+
+
+#-------REMOVE----------------------------------
+temp <- combined
+combined <- temp
+aggr(combined)
+
+
+#write.csv(Housing Project Complete, file = "C:/Users/jason/Desktop/Capstone/Final Project Housing Prices/numbers.csv")
+
+#-------REMOVE-----------------------------------
+
+#___________DATA QUESTIONS____________
+# Data is skewed to the right due to fewer people able to afford expensive
+# housing, but outliers appearing above the mean.
+# Large spike at ~ 175-185k , why?
+# What to do with the potential outliers in GrLivArea?
+# Why is there a price drop with a 4 car garage and doesn't follow the suggested trend?
+
+
+
+
+
+
+
+#_________Questions in general__________
+# test set always included for transformations/engineering?
+
+# When using seeds, can you pick any number?
+# Prediction based on location/zip/city? -> sorted into neighborhoods to see trends by area
+        #check with colinearity between neighborhoods vs groups
+
+
+
+
+
+
+
+
+
+
