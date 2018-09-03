@@ -5,6 +5,10 @@ date: "Aug 7th 2018"
 autosize: true
 
 
+***
+
+![House](House.jpg)
+
 
 Housing Prices
 ========================================================
@@ -16,6 +20,9 @@ How to determine what really is the value of your home when there are so many th
 - How new
 - Plus many many more
 
+***
+
+![HomeBuying](HomeBuying.jpg)
 
 Importance of Understanding
 ========================================================
@@ -53,14 +60,15 @@ Correlation
 Using a correlation plot, I was able to quickly see the most important variables for determining SalePrice
 
 ![plot of chunk Correlation](PredictingHousingPrices-figure/Correlation-1.png)
+***
 * OverallQual, totalSqFt, GrLivArea, ExterQual, and KitchenQual were the top 5 traits
 * Shows several points which have "similar" values (GarageCars & GarageArea), suggesting they are colinear
 * I used this to build my model and refine the most important traits
 
-
 OverallQuality vs Price
 =========================================================
 ![plot of chunk unnamed-chunk-2](PredictingHousingPrices-figure/unnamed-chunk-2-1.png)
+
 ***
 Houses had a given quality rating, 1-10
 * Significant increase around 7~8 rating
@@ -126,5 +134,5 @@ Using The Model
 
 * A builder could look at this and make better plans for how to build the house. Finding contractors that use high quality materials and do a great job.
 
-
+![bad](bad.jpg)
 
